@@ -33,7 +33,12 @@ class LiteLLMProvider(LLMProvider):
         )
         
         # Track if using custom endpoint (vLLM, etc.)
-        self.is_vllm = bool(api_base) and not self.is_openrouter
+        # Exclude Moonshot AI from vLLM detection
+        self.is_vllm = (
+            bool(api_base) and
+            not self.is_openrouter and
+            not ("moonshot" in default_model or "kimi" in default_model.lower())
+        )
         
         # Configure LiteLLM based on provider
         if api_key:
@@ -53,9 +58,19 @@ class LiteLLMProvider(LLMProvider):
                 os.environ.setdefault("ZHIPUAI_API_KEY", api_key)
             elif "groq" in default_model:
                 os.environ.setdefault("GROQ_API_KEY", api_key)
+            elif "moonshot" in default_model or "kimi" in default_model:
+                # Set Moonshot AI API key
+                os.environ.setdefault("MOONSHOT_API_KEY", api_key)
+                
+                # Set China API base URL for Moonshot AI if no custom api_base configured
+                # This ensures Moonshot models use the correct endpoint
+                if not self.api_base and ("moonshot" in default_model or "kimi" in default_model.lower()):
+                    os.environ.setdefault("MOONSHOT_API_BASE", "https://api.moonshot.cn/v1")
         
+        # Set api_base only for non-Moonshot providers (vLLM, custom endpoints)
         if api_base:
-            litellm.api_base = api_base
+            if not ("moonshot" in default_model or "kimi" in default_model.lower()):
+                litellm.api_base = api_base
         
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
@@ -96,8 +111,17 @@ class LiteLLMProvider(LLMProvider):
         ):
             model = f"zai/{model}"
         
+        # For Moonshot AI (Kimi), ensure prefix is present
+        # Handle cases like "kimi-k2.5" -> "moonshot/kimi-k2.5"
+        # Only add prefix if not already present to avoid double prefixing
+        if ("moonshot" in model.lower() or "kimi" in model.lower()) and not (
+            model.startswith("moonshot/") or
+            model.startswith("zai/") or
+            model.startswith("openrouter/")
+        ):
+            model = f"moonshot/{model}"
+        
         # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
-        # Convert openai/ prefix to hosted_vllm/ if user specified it
         if self.is_vllm:
             model = f"hosted_vllm/{model}"
         
@@ -105,12 +129,24 @@ class LiteLLMProvider(LLMProvider):
         if "gemini" in model.lower() and not model.startswith("gemini/"):
             model = f"gemini/{model}"
         
+        # Detect kimi-k2.5 to handle special parameters
+        self.is_kimi_k2_5 = model == "kimi-k2.5" or model.startswith("moonshot/kimi-k2.5")
+        
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        
+        # For kimi-k2.5, set temperature to 1.0 (only allowed value)
+        if self.is_kimi_k2_5:
+            kwargs["temperature"] = 1.0
+        
+        # Skip unsupported parameters for kimi-k2.5
+        if self.is_kimi_k2_5:
+            kwargs.pop("presence_penalty", None)
+            kwargs.pop("frequency_penalty", None)
         
         # Pass api_base directly for custom endpoints (vLLM, etc.)
         if self.api_base:
